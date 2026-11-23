@@ -114,10 +114,14 @@ def looks_like_api_prompt(value):
 
 
 def build_bundle(title, stem, prompt_text):
-    """画布功能包。只有一个 comfy_generate 节点，workflow 填刚写出去的文件名。
+    """画布功能包。文本输入 → comfy_generate 两个节点，workflow 填刚写出去的文件名。
 
-    参数只留 prompt 一个可填的：换场景、换服装都改这一处。
-    workflow 写死在节点里，用户在画布上看得见、改得动，但不用自己记文件名。
+    为什么不是单节点：画布发布成技能时，「工具节点里的字面量」会被写死成固定值，
+    只有从输入节点连进参数位的东西才会变成可填参数。单节点版本发布出去是零参数，
+    每次都画同一张。所以这里摆一个 input_text，prompt 走连线进去。
+
+    用户在画布上：改提示词就跟改一个输入框一样；workflow 写死在节点里，
+    看得见、改得动，但不用自己记文件名。
     """
     flow_id = flow_id_for(stem)
     return {
@@ -131,17 +135,25 @@ def build_bundle(title, stem, prompt_text):
                 "nodes": [
                     {
                         "id": "n1",
+                        "type": "input_text",
+                        "x": 80,
+                        "y": 150,
+                        "value": prompt_text or "",
+                        "note": "提示词：换场景、换服装只改这一格",
+                    },
+                    {
+                        "id": "n2",
                         "type": "comfy_generate",
-                        "x": 160,
-                        "y": 140,
+                        "x": 420,
+                        "y": 150,
                         "params": {
-                            "prompt": prompt_text or "",
+                            "prompt": "${n1}",
                             "workflow": stem + ".json",
                         },
                         "note": "ComfyUI 导出的工作流：%s" % (stem + ".json"),
-                    }
+                    },
                 ],
-                "edges": [],
+                "edges": [["n1", "n2", "prompt"]],
             }
         ],
         "tools": [
