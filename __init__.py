@@ -1,19 +1,22 @@
 # -*- coding: utf-8 -*-
 """把 ComfyUI 的当前工作流导出成「思维画布」能直接导入的功能。
 
-三件事想清楚才这么写：
+四件事想清楚才这么写：
 
-1. 不碰 ComfyUI 界面代码。走它自己的扩展机制：一条 HTTP 路由 + 一个小脚本。
+1. 不碰 ComfyUI 界面代码。走它自己的扩展机制：两条 HTTP 路由 + 一个小脚本。
    升级 ComfyUI 不会把这里冲掉。
 
 2. 浏览器不直接找画布。画布代理只认自己那个 origin，从 8188 发过去的请求会被
    拦掉——放宽它等于拆防护。所以这里由 Python 落盘，画布那边再读文件。
    两边谁也不认识谁，各写各的。
 
-3. 一次导出两个文件，各有用处：
-   - <target>/workflows/<slug>.json        ComfyUI 的 API 格式，comfy_generate 靠它跑
-   - <target>/canvas-flows/<slug>.json     画布的功能包（schemaVersion 1），拖进去就能用
-   两个文件同名不同目录，改了哪个都一眼认得出。
+3. 两种出口，用途不同：
+   - 写盘：<target>/workflows/<slug>.json       ComfyUI 的 API 格式，comfy_generate 靠它跑
+           <target>/canvas-flows/<slug>.json     画布的功能包（schemaVersion 1）
+     要求本机有一份 WhaleLife（comfy 插件目录）。
+   - 下载：/whalelife/flow-bundle 只回功能包，不写盘。
+     给「只想把文件带走」的人用——没有安装 WhaleLife 也能导出，拿到别的机器再导入。
+   功能包只由 build_bundle 生成一份，两条路都走它，不各自实现一遍。
 
 4. 目标可以有好几个（两台 WhaleLife、一台日常一台纯净）。写的时候每个都写，
    省得为"导到哪台"来回改配置；一个都不在就明确报错，别静默成功。
@@ -154,6 +157,35 @@ def build_bundle(title, stem, prompt_text):
     }
 
 
+def hint_text_from(prompt):
+    """工作流里第一个 CLIPTextEncode 的正向文本，拿来当画布节点的初始提示词。"""
+    for node in prompt.values():
+        if node.get("class_type") == "CLIPTextEncode":
+            text = (node.get("inputs") or {}).get("text")
+            if isinstance(text, str) and text.strip():
+                return text.strip()[:400]
+    return ""
+
+
+def parse_body(body):
+    """两条路由共用的解析：校验工作流、定名字、取提示词初值。
+
+    返回 dict；不合格就抛 ValueError，调用方把它换成 400。
+    """
+    prompt = body.get("api") or body.get("prompt")
+    if not looks_like_api_prompt(prompt):
+        raise ValueError(
+            "这不是 ComfyUI 的 API 格式工作流（顶层应当是 {节点id: {class_type, inputs}}）。"
+        )
+    title = str(body.get("name") or "ComfyUI 功能").strip()[:40] or "ComfyUI 功能"
+    return {
+        "prompt": prompt,
+        "title": title,
+        "slug": slugify(body.get("slug") or title),
+        "hint": hint_text_from(prompt),
+    }
+
+
 def resolve_targets(cfg):
     """分成「能用」和「配了但不存在」两组。
 
@@ -179,17 +211,13 @@ def register_routes():
         except Exception:
             return web.json_response({"ok": False, "error": "请求体不是 JSON。"}, status=400)
 
-        prompt = body.get("api") or body.get("prompt")
-        if not looks_like_api_prompt(prompt):
-            return web.json_response(
-                {
-                    "ok": False,
-                    "error": "这不是 ComfyUI 的 API 格式工作流（顶层应当是 {节点id: {class_type, inputs}}）。",
-                },
-                status=400,
-            )
+        try:
+            parsed = parse_body(body)
+        except ValueError as error:
+            return web.json_response({"ok": False, "error": str(error)}, status=400)
 
-        title = str(body.get("name") or "ComfyUI 功能").strip()[:40] or "ComfyUI 功能"
+        prompt = parsed["prompt"]
+        title = parsed["title"]
         cfg = load_config()
         allow_overwrite = body.get("overwrite") is True and cfg["allowOverwrite"] is True
 
@@ -197,7 +225,8 @@ def register_routes():
         if not ready:
             hint = (
                 "没有可写的目标目录。请在 %s 里把 targets 填成 WhaleLife 的 comfy 插件目录，"
-                "例如 D:\\WhaleLife\\plugins\\comfy（可填多个）。" % CONFIG
+                "例如 D:\\WhaleLife\\plugins\\comfy（可填多个）。"
+                "只想拿文件的话，用菜单里的「导出画布功能文件（下载）」，那个不需要装 WhaleLife。" % CONFIG
             )
             if missing:
                 hint += " 现在配置的这几个都不存在：%s。" % "；".join(missing)
@@ -205,16 +234,7 @@ def register_routes():
                 {"ok": False, "error": hint, "missing": missing}, status=409
             )
 
-        # 工作流里第一个 CLIPTextEncode 的正向文本，拿来当画布节点的初始提示词。
-        hint_text = ""
-        for node in prompt.values():
-            if node.get("class_type") == "CLIPTextEncode":
-                text = (node.get("inputs") or {}).get("text")
-                if isinstance(text, str) and text.strip():
-                    hint_text = text.strip()[:400]
-                    break
-
-        base_slug = slugify(body.get("slug") or title)
+        base_slug = parsed["slug"]
         written = []
         for target in ready:
             raw_dir = target / cfg["workflows"]
@@ -230,7 +250,7 @@ def register_routes():
                     json.dumps(prompt, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
                 flow_file.write_text(
-                    json.dumps(build_bundle(title, stem, hint_text), ensure_ascii=False, indent=2),
+                    json.dumps(build_bundle(title, stem, parsed["hint"]), ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
             except Exception as error:
@@ -260,6 +280,36 @@ def register_routes():
             }
         )
 
+    @routes.post("/whalelife/flow-bundle")
+    async def flow_bundle(request):
+        """只回功能包，不碰磁盘。
+
+        给「没有 WhaleLife 的机器」用：在 ComfyUI 里连好图，导出这个文件，
+        带走到另一台的画布上导入。所以这里不要求 targets 配好。
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "请求体不是 JSON。"}, status=400)
+
+        try:
+            parsed = parse_body(body)
+        except ValueError as error:
+            return web.json_response({"ok": False, "error": str(error)}, status=400)
+
+        stem = parsed["slug"]
+        return web.json_response(
+            {
+                "ok": True,
+                "slug": stem,
+                "name": parsed["title"],
+                "filename": stem + ".json",
+                "bundle": build_bundle(parsed["title"], stem, parsed["hint"]),
+                "note": "这是画布的功能包，不是 ComfyUI 的 API 工作流。"
+                "拿到思维画布点「注册功能」粘贴，或用「导入工作流」选这个文件。",
+            }
+        )
+
     @routes.get("/whalelife/config")
     async def config(_request):
         cfg = load_config()
@@ -280,7 +330,7 @@ try:
     from server import PromptServer
 
     PromptServer.instance.app.add_routes(register_routes())
-    print("[WhaleLife] 导出路由已挂上：POST /whalelife/export")
+    print("[WhaleLife] 导出路由已挂上：POST /whalelife/export, POST /whalelife/flow-bundle")
 except Exception as error:  # ComfyUI 换了接口也不该让启动失败
     print("[WhaleLife] 路由挂载失败：%s" % error)
 

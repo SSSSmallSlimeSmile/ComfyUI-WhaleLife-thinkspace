@@ -6,7 +6,14 @@
 
 ## 它做什么
 
-菜单 **编辑 → 存到 WhaleLife**（英文界面 **Edit → 存到 WhaleLife**），在当前画布上点一下，会写两份文件：
+菜单 **编辑**（英文界面 **Edit**）下面有两条命令：
+
+| 命令 | 做什么 | 要不要装 WhaleLife |
+| --- | --- | --- |
+| **存到 WhaleLife** | 直接写进本机那份 `comfy` 插件目录 | 要 |
+| **导出画布功能文件（下载）** | 下载成一个 `.json`，自己拿去导入 | 不要 |
+
+「存到 WhaleLife」会写两份文件：
 
 | 写哪里 | 是什么 | 谁用 |
 | --- | --- | --- |
@@ -14,6 +21,10 @@
 | `plugins/comfy/canvas-flows/<名字>.json` | 思维画布的「功能包」（`schemaVersion: 1`） | 画布工具栏的 **注册功能** |
 
 两份同名不同目录，改了哪个一眼认得出。
+
+「导出画布功能文件（下载）」只产出**功能包**，不写盘、不要求 `config.json` 配好。适合：给另一台机器、或者本机暂时没装 WhaleLife。走浏览器下载，文件落在浏览器的下载目录里——**看得见、能带走、能传给别的画布**。
+
+注意两条下载路线的区别：**功能包**只是画布上的一个节点（`workflow` 指向某个文件名），它**不含**工作流本身。要把图真的画出来，工作流 JSON 也得一起带过去——那份用「存到 WhaleLife」，或者手动放进 `plugins/comfy/workflows/`。
 
 ## 装
 
@@ -79,6 +90,17 @@ Content-Type: application/json
 | `400` | 请求体不是 JSON，或者 `api` 不是 API 格式 |
 | `409` | 没有可写的目标目录（`config.json` 的 `targets` 没填或都不存在） |
 | `500` | 建目录或写文件失败 |
+
+只要功能包、不想写盘（不需要 `targets`）：
+
+```http
+POST /whalelife/flow-bundle
+Content-Type: application/json
+
+{"name": "勘-图书馆", "api": {"3": {"class_type": "KSampler", "inputs": {...}}}}
+```
+
+回 `200 {ok: true, slug, name, filename, bundle}`，`bundle` 就是画布的功能包本体。`400` 的判定跟上面一样。
 
 `GET /whalelife/config` 回当前配置，附带 `ready` / `missing`，用来排查路径。
 
