@@ -1,0 +1,11 @@
+[project]
+name = "comfyui-whalelife-thinkspace"
+version = "0.1.0"
+description = "Export the current ComfyUI workflow as a WhaleLife thinking-space canvas flow"
+license = { text = "MIT" }
+dependencies = []
+
+[tool.comfy]
+PublisherId = "ssssmallslimesmile"
+DisplayName = "WhaleLife ThinkSpace Bridge"
+Icon = ""
