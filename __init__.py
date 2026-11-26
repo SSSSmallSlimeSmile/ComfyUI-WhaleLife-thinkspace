@@ -21,15 +21,23 @@
 4. 目标可以有好几个（两台 WhaleLife、一台日常一台纯净）。写的时候每个都写，
    省得为"导到哪台"来回改配置；一个都不在就明确报错，别静默成功。
 """
+import asyncio
 import hashlib
 import json
 import re
 import time
+import sys
 from pathlib import Path
 
 from aiohttp import web
 
 HERE = Path(__file__).parent
+
+# 同目录还有 whalelife_chat.py。ComfyUI 按路径加载 custom_nodes，不会把插件目录
+# 放进 sys.path，所以那句 from whalelife_chat import 会 ModuleNotFoundError。
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+
 CONFIG = HERE / "config.json"
 EXAMPLE = HERE / "config.example.json"
 
@@ -65,6 +73,10 @@ def load_config():
     if not merged["targets"] and isinstance(legacy, str) and legacy.strip():
         merged["targets"] = [legacy.strip()]
     merged["targets"] = [str(t).strip() for t in merged["targets"] if str(t).strip()]
+    # whale 这一段给「问话」用，不在 DEFAULTS 里，上面那个过滤会把它整个丢掉，
+    # 结果 token 永远读成空、请求全被 401 挡回来。这里单独带过去。
+    whale = data.get("whale")
+    merged["whale"] = whale if isinstance(whale, dict) else {}
     return merged
 
 
@@ -338,15 +350,186 @@ def register_routes():
     return routes
 
 
+# ---------------------------------------------------------------- 问话那一条
+chat_routes = web.RouteTableDef()
+# 反方向：ComfyUI 问 WhaleLife 一句话。走 whalelife_chat.WhaleLifeClient，
+# 两条路由 + 一个节点。配置都在 config.json 的 whale 那一段。
+
+def _graph_block(graph):
+    """把前端传来的画布摘要翻成一段给人读的中文，接在问话前面。
+
+    只做格式化，不做裁剪以外的判断 —— 节点多到一定量就只报计数，
+    不然一条问话能顶掉整个上下文窗口。
+    """
+    if not isinstance(graph, dict):
+        return ""
+    total = int(graph.get("total") or 0)
+    selected = graph.get("selected") or []
+    if not total and not selected:
+        return ""
+
+    lines = ["[画布] 共 %d 个节点，%s 条连线" % (total, graph.get("links") or 0)]
+    counts = graph.get("counts") or {}
+    if isinstance(counts, dict) and counts:
+        top = sorted(counts.items(), key=lambda kv: -int(kv[1] or 0))[:10]
+        lines.append("类型：" + " · ".join("%s×%s" % (k, v) for k, v in top))
+
+    picked = [n for n in selected if isinstance(n, dict)]
+    if not picked:
+        lines.append("当前没有选中节点。")
+    else:
+        lines.append("选中 %d 个：" % int(graph.get("selectedCount") or len(picked)))
+        for node in picked:
+            head = "#%s %s" % (node.get("id"), node.get("type") or "?")
+            title = node.get("title")
+            if title:
+                head += "「%s」" % title
+            widgets = node.get("widgets") or {}
+            if isinstance(widgets, dict) and widgets:
+                body = "，".join(
+                    "%s=%s" % (k, json.dumps(v, ensure_ascii=False) if not isinstance(v, str) else v)
+                    for k, v in widgets.items()
+                )
+                head += "  => " + body
+            lines.append("· " + head)
+    return "\n".join(lines)
+
+
+@chat_routes.post("/whalelife/ask")
+async def whalelife_ask(request):
+    """给前端面板用：浏览器带着自己那份配置来问，Python 这层转发。
+
+    为什么不在浏览器里直接打 9270：跨 origin。那个代理只认自己那个 origin，
+    放宽它等于拆防护。所以照旧由 Python 落这条请求。
+    """
+    from whalelife_chat import WhaleLifeClient, WhaleLifeError
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "请求体不是 JSON。"}, status=400)
+
+    text = str(body.get("text") or "").strip()
+    if not text:
+        return web.json_response({"ok": False, "error": "text 是空的。"}, status=400)
+
+    cfg = load_config().get("whale") or {}
+    client = WhaleLifeClient(
+        base=cfg.get("base_url") or "http://127.0.0.1:9270",
+        password=cfg.get("password") or "",
+        token=cfg.get("token") or "",
+        timeout=min(600, max(5, int(body.get("timeout") or cfg.get("timeout") or 180))),
+    )
+    block = _graph_block(body.get("graph"))
+    if block:
+        text = block + "\n\n[我] " + text
+
+    try:
+        mode = str(body.get("mode") or "")
+        if mode not in ("persistent", "transient"):
+            mode = ""
+        reply = await asyncio.to_thread(
+            client.ask,
+            text,
+            str(body.get("session") or cfg.get("session") or ""),
+            str(body.get("persona") or cfg.get("persona") or ""),
+            None,
+            mode,
+        )
+        return web.json_response({"ok": True, "reply": reply})
+    except WhaleLifeError as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=502)
+    except Exception as error:  # 别让一条问话把 ComfyUI 后端拖死
+        return web.json_response({"ok": False, "error": "转发失败：%s" % error}, status=500)
+
+
+@chat_routes.get("/whalelife/ask-config")
+async def whalelife_ask_config(_request):
+    cfg = load_config().get("whale") or {}
+    return web.json_response(
+        {
+            "ok": True,
+            "base_url": cfg.get("base_url") or "http://127.0.0.1:9270",
+            "session": cfg.get("session") or "",
+            "persona": cfg.get("persona") or "",
+            "timeout": cfg.get("timeout") or 180,
+            "token_set": bool(str(cfg.get("token") or "").strip()),
+        }
+    )
+
+
+class WhaleLifeAsk:
+    """工作流里摆一格「问勘」：给一段话，输出她回的一段话。
+
+    典型用法：让她写提示词，输出接 CLIPTextEncode —— 出图这件事就不用
+    自己想词了。
+
+    为什么字段这么少：每多一个输入，工作流里就多一组控件，用户就得记。
+    只留「说什么」和「最多等多久」两个必填，会话/人格/令牌走 config.json，
+    改一次全局生效。
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "用英文写一段出图提示词，描述：傍晚的天台，风很大。只给提示词，不要解释。",
+                    },
+                ),
+                "timeout": ("INT", {"default": 180, "min": 5, "max": 600, "step": 5}),
+            },
+            "optional": {
+                "session": ("STRING", {"default": "", "multiline": False}),
+                "persona": ("STRING", {"default": "", "multiline": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("reply",)
+    FUNCTION = "run"
+    CATEGORY = "WhaleLife/实用"
+    DESCRIPTION = "问 WhaleLife 一句话，拿回复。默认不写进主会话历史。"
+
+    def run(self, text, timeout=180, session="", persona=""):
+        from whalelife_chat import WhaleLifeClient, WhaleLifeError
+
+        cfg = load_config().get("whale") or {}
+        client = WhaleLifeClient(
+            base=cfg.get("base_url") or "http://127.0.0.1:9270",
+            password=cfg.get("password") or "",
+            token=cfg.get("token") or "",
+            timeout=timeout,
+        )
+        try:
+            reply = client.ask(text, session or cfg.get("session") or "", persona or cfg.get("persona") or "")
+        except WhaleLifeError as error:
+            # 节点里抛错会把整条工作流判失败，但静默返回空串更坏 ——
+            # 后面 CLIPTextEncode 吃了空串会画出一张毫无关系的东西，
+            # 用户还得猜是哪一步坏的。宁可直接红。
+            raise RuntimeError("[WhaleLife] %s" % error)
+        return (reply,)
+
+
+
+
 try:
     from server import PromptServer
 
     PromptServer.instance.app.add_routes(register_routes())
-    print("[WhaleLife] 导出路由已挂上：POST /whalelife/export, POST /whalelife/flow-bundle")
+    PromptServer.instance.app.add_routes(chat_routes)
+    print("[WhaleLife] 路由已挂上：导出 2 条 + 问话 2 条（POST /whalelife/ask）")
 except Exception as error:  # ComfyUI 换了接口也不该让启动失败
     print("[WhaleLife] 路由挂载失败：%s" % error)
 
+NODE_CLASS_MAPPINGS = {
+    "WhaleLifeAsk": WhaleLifeAsk,
+}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "WhaleLifeAsk": "问勘（WhaleLife）",
+}
 WEB_DIRECTORY = "./web"
-NODE_CLASS_MAPPINGS = {}
-NODE_DISPLAY_NAME_MAPPINGS = {}
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]

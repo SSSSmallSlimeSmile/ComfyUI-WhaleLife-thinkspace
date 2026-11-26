@@ -4,5 +4,13 @@
   ],
   "workflows": "workflows",
   "canvasFlows": "canvas-flows",
-  "allowOverwrite": false
+  "allowOverwrite": false,
+  "whale": {
+    "base_url": "http://127.0.0.1:9270",
+    "password": "",
+    "token": "",
+    "session": "",
+    "persona": "",
+    "timeout": 180
+  }
 }

@@ -130,3 +130,48 @@ Content-Type: application/json
 ## 许可
 
 MIT。WhaleLife 本体是 AGPL-3.0。
+
+## 问勘：从 ComfyUI 这边问 WhaleLife
+
+导出那条是单向的（WhaleLife 看 ComfyUI）。这一节是反方向：在 ComfyUI 里直接问她一句话。
+
+### 三个入口
+
+| 入口 | 在哪 | 干什么 |
+|---|---|---|
+| 节点「问勘（WhaleLife）」 | 节点列表 → WhaleLife/实用 | 输入 `text`，输出她的回复字符串。接到 CLIPTextEncode 就是「她写词、你出图」 |
+| 菜单「问勘（打开对话面板）」 | 编辑（Edit） | 右下角浮出来的对话窗。可以随手问，也可以把回复填进选中的节点 |
+| 路由 `POST /whalelife/ask` | 本机脚本 | 给别的自动化用，body `{"text":"…"}` |
+
+### 配置
+
+`config.json` 里多一段 `whale`：
+
+```json
+{
+  "whale": {
+    "base_url": "http://127.0.0.1:9270",
+    "password": "",
+    "token": "",
+    "session": "",
+    "persona": "",
+    "timeout": 180
+  }
+}
+```
+
+- `token` 必须和 WhaleLife 那边「画布问话」插件里的令牌一字不差，否则 401
+- `session` 留空 = 问当前主会话；填会话 id 就固定问那条
+- `persona` 留空 = 用会话自己的人格
+- `password` 是宿主网页的访问密码，空的就填空
+
+### 为什么是两步
+
+WhaleLife 的网页层在插件路由之前就卡登录 cookie，所以 `whalelife_chat.py` 先 `POST /api/login` 拿 cookie，再带 cookie 和令牌打插件路由。cookie 在宿主进程内存里，宿主一重启就失效 —— 客户端遇到 401 会自动重登一次，不用手动清。
+
+### 四条边界
+
+1. **默认不写进主会话历史**。ComfyUI 里连点十次，主会话不会多出十句用户话。要留痕就把 WhaleLife 那个插件的 `mode` 改成 `persistent`。
+2. **一次只放一条**。上一句没回来，下一次进来是 429。节点是同步等，卡住会连整条工作流一起卡，所以 `timeout` 要按你的耐心填。
+3. **跨 origin 那条没动**。浏览器不直接打 9270，全走本机 Python 转发，谁也不用放宽防护。
+4. **节点失败会红**，不返回空串。空串喂给 CLIPTextEncode 会画出一张毫无关系的东西，比报错难查得多。
