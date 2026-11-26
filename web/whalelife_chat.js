@@ -211,11 +211,80 @@ function applyLayout() {
   positionLauncher();
 }
 
-/** 侧栏占满右边的时候，那颗圆按钮让到面板左边，免得压着输入框。 */
+const LS_BTN = "whalelife.chat.btn";
+const BTN_SIZE = 48;
+
+// 这颗按钮以前固定在右下角 18px，正好压在节点参数框上。现在可以拖，位置记在
+// localStorage；面板开着的时候直接收起来（面板自己有 ×，不缺这一个入口）。
+let btnPress = null;
+let btnJustDragged = false;
+
+function loadBtn() {
+  const raw = load(LS_BTN);
+  if (!raw) return null;
+  try {
+    const p = JSON.parse(raw);
+    if (!Number.isFinite(p?.x) || !Number.isFinite(p?.y)) return null;
+    return p;
+  } catch {
+    return null;
+  }
+}
+
+function defaultBtn() {
+  const vw = window.innerWidth || 1400;
+  const vh = window.innerHeight || 900;
+  return { x: vw - BTN_SIZE - 14, y: vh - BTN_SIZE - 14 };
+}
+
+/** 把按钮放到 (x, y)，夹在视口里。返回真落下去的坐标。 */
+function placeLauncher(x, y) {
+  if (!launcher) return { x: 0, y: 0 };
+  const vw = window.innerWidth || 1400;
+  const vh = window.innerHeight || 900;
+  const nx = Math.min(Math.max(0, x), Math.max(0, vw - BTN_SIZE));
+  const ny = Math.min(Math.max(0, y), Math.max(0, vh - BTN_SIZE));
+  launcher.style.left = Math.round(nx) + "px";
+  launcher.style.top = Math.round(ny) + "px";
+  launcher.style.right = "auto";
+  launcher.style.bottom = "auto";
+  return { x: nx, y: ny };
+}
+
 function positionLauncher() {
   if (!launcher) return;
-  launcher.style.right = (mode === "dock" ? Math.round(dockW) + 18 : 18) + "px";
+  launcher.style.display = panel ? "none" : "";
+  const spot = loadBtn() ?? defaultBtn();
+  placeLauncher(spot.x, spot.y);
 }
+
+function beginLauncherDrag(event) {
+  if (!launcher) return;
+  if (event.button !== undefined && event.button !== 0) return;
+  const box = launcher.getBoundingClientRect();
+  btnPress = { sx: event.clientX, sy: event.clientY, ox: box.left, oy: box.top, moved: false };
+  event.preventDefault();
+}
+
+window.addEventListener("mousemove", (event) => {
+  if (!btnPress || !launcher) return;
+  const dx = event.clientX - btnPress.sx;
+  const dy = event.clientY - btnPress.sy;
+  // 4px 以内算手抖，仍当成点击去开面板。
+  if (!btnPress.moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+  btnPress.moved = true;
+  placeLauncher(btnPress.ox + dx, btnPress.oy + dy);
+});
+
+window.addEventListener("mouseup", () => {
+  if (!btnPress) return;
+  const moved = btnPress.moved;
+  btnPress = null;
+  if (!moved || !launcher) return;
+  btnJustDragged = true;
+  const box = launcher.getBoundingClientRect();
+  save(LS_BTN, JSON.stringify({ x: Math.round(box.left), y: Math.round(box.top) }));
+});
 
 function updateModeButton() {
   if (!view) return;
@@ -481,6 +550,7 @@ function mount() {
   document.body.appendChild(panel);
   applyLayout();
   renderMessages();
+  positionLauncher();
 }
 
 function unmount() {
@@ -489,6 +559,7 @@ function unmount() {
   panel.remove();
   panel = null;
   view = null;
+  positionLauncher();
 }
 
 /* ---------------------------------------------------------------- 内容 */
@@ -665,30 +736,46 @@ function mountLauncher() {
     "button",
     [
       "position:fixed",
-      "right:18px",
-      "bottom:18px",
-      "width:56px",
-      "height:56px",
-      "border-radius:28px",
+      "width:48px",
+      "height:48px",
+      "border-radius:24px",
       "z-index:9001",
       "border:1px solid rgba(124,92,255,.55)",
       "background:rgba(124,92,255,.3)",
       "color:inherit",
-      "font-size:14px",
+      "font-size:13px",
       "font-family:inherit",
       "cursor:pointer",
+      "opacity:.82",
+      "user-select:none",
       "box-shadow:0 8px 24px rgba(0,0,0,.45)",
     ].join(";"),
     "问勘",
   );
   launcher.id = "whalelife-chat-launcher";
-  launcher.title = "问勘（在 ComfyUI 里跟勘说话）";
-  launcher.onclick = togglePanel;
+  launcher.title = "问勘（在 ComfyUI 里跟勘说话）· 按住可以拖走，位置会记住";
+  launcher.onmousedown = beginLauncherDrag;
+  launcher.onclick = () => {
+    // 刚拖过就别当成点击，否则松手那一下会把面板弹出来。
+    if (btnJustDragged) {
+      btnJustDragged = false;
+      return;
+    }
+    togglePanel();
+  };
+  launcher.onmouseenter = () => {
+    launcher.style.opacity = "1";
+  };
+  launcher.onmouseleave = () => {
+    launcher.style.opacity = ".82";
+  };
   document.body.appendChild(launcher);
+  positionLauncher();
 }
 
 // 窗口尺寸变了：侧栏要重算画布边距，浮窗要防止跑到屏幕外。
 window.addEventListener("resize", () => {
+  positionLauncher();
   if (!panel) return;
   if (mode === "dock") {
     panel.style.width = Math.round(dockW) + "px";
